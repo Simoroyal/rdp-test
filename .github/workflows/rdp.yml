@@ -51,7 +51,7 @@ jobs:
       - name: Start ngrok TCP tunnel on 3389
         shell: powershell
         run: |
-          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --region=eu --remote-addr=0.tcp.ngrok.io:443" -NoNewWindow
+          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --region=eu" -NoNewWindow
           Start-Sleep -Seconds 6
           $public = $null
           try {
