@@ -1,0 +1,83 @@
+name: Ephemeral Windows RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Set RDP password for runneradmin
+        shell: powershell
+        run: |
+          $pwdPlain = "${{ secrets.RDP_PASSWORD }}"
+          if ([string]::IsNullOrWhiteSpace($pwdPlain)) {
+            throw "RDP_PASSWORD secret is missing."
+          }
+          $password = ConvertTo-SecureString $pwdPlain -AsPlainText -Force
+          $user = "runneradmin"
+          # إذا المستخدم غير موجود، أنشئه
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $user -Password $password -FullName "Runner Admin" -Description "Temporary RDP user" -PasswordNeverExpires:$true
+          } else {
+            Set-LocalUser -Name $user -Password $password
+          }
+          net user $user /active:yes
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          Write-Host "Password set and RDP group membership ensured for $user."
+
+      - name: Enable Remote Desktop + Firewall
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1
+          Write-Host "RDP enabled and firewall configured."
+
+      - name: Download ngrok
+        shell: powershell
+        run: |
+          $url = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "ngrok.zip"
+          Expand-Archive ngrok.zip -DestinationPath .
+          .\ngrok.exe version
+
+      - name: Auth ngrok
+        shell: powershell
+        run: .\ngrok.exe config add-authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
+
+      - name: Start ngrok TCP tunnel on 3389
+        shell: powershell
+        run: |
+          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --region=eu" -NoNewWindow
+          Start-Sleep -Seconds 6
+          $public = $null
+          try {
+            $tunnels = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5
+            $public = ($tunnels.tunnels | Where-Object {$_.proto -eq "tcp"}).public_url
+          } catch {
+            Write-Host "ngrok API not ready; attempting log parsing..."
+          }
+          if (-not $public) {
+            Start-Sleep -Seconds 4
+            $match = Select-String -Path "ngrok.log" -Pattern "url=tcp://[^\s]+" | Select-Object -Last 1
+            if ($match) {
+              $public = ($match.Matches[0].Value -split "url=")[1]
+            }
+          }
+          if (-not $public) { throw "Failed to discover ngrok public TCP URL." }
+          $addr = $public.Replace("tcp://","")
+          "RDP Address: $addr" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+          "Username: runneradmin" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+          "Password: (the secret you set in RDP_PASSWORD)" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+          Write-Host "Ngrok public URL: $public"
+
+      - name: Keep session alive (up to 6h)
+        shell: powershell
+        run: |
+          for ($i=1; $i -le 360; $i++) {
+            Write-Host "RDP live... minute $i / 360"
+            Start-Sleep -Seconds 60
+          }
